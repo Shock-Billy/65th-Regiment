@@ -1,13 +1,14 @@
 // =========================================================
 // Connexion facultative avec Discord.
-// Le site est statique (GitHub Pages) : on utilise la connexion
-// « implicite » de Discord, entièrement dans le navigateur.
+// Tout se passe dans le navigateur (connexion « implicite » de Discord).
 // Portées demandées : « identify » (pseudo, avatar) et
 // « guilds.members.read » (rôles sur le serveur de la Shock).
-// Les membres du serveur ayant le rôle de gérant voient en plus
-// « Gérer le code d'accès » (code du menu de modification).
+// Les membres du serveur ayant le rôle de gérant voient une étiquette rouge « 1010 Fox »
+// et ont accès complet à l'éditeur et à la page « Gestion des officiers ».
+// Aucun serveur ni compte externe : la vérification du rôle se fait dans le navigateur.
 // Les identifiants se règlent dans site-data.js (settings.discord…)
-// ou dans l'éditeur.
+// ou dans l'éditeur. Le bouton n'apparaît que si le site est ouvert via une
+// adresse web (http/https) déclarée dans Discord, pas depuis un fichier local.
 // =========================================================
 
 (function () {
@@ -17,21 +18,30 @@
   const SCOPE = "identify guilds.members.read";
   // Valeurs par défaut si les réglages sont vides
   const DEFAULT_GUILD = "733070665569140769";
-  const DEFAULT_ROLE = "1313599623004160082";
+  const DEFAULT_ROLES = "1313599623004160082";   // rôle(s) « CMDM 1010 Fox » (plusieurs : séparés par une virgule)
   const guildId = () => (SITE_DATA.settings.discordGuildId || DEFAULT_GUILD).trim();
-  const roleId = () => (SITE_DATA.settings.discordRoleId || DEFAULT_ROLE).trim();
+  // Un ou plusieurs rôles (séparés par une virgule) donnent le statut de gérant « CMDM 1010 Fox »
+  const roleIds = () => String(SITE_DATA.settings.discordRoleId || DEFAULT_ROLES).split(/[\s,;]+/).filter(Boolean);
 
   const store = {
     get(k, s = localStorage) { try { return JSON.parse(s.getItem(k)); } catch { return null; } },
     set(k, v, s = localStorage) { try { s.setItem(k, JSON.stringify(v)); } catch {} },
     del(k, s = localStorage) { try { s.removeItem(k); } catch {} },
   };
-  const clientId = () => (SITE_DATA.settings.discordClientId || "").trim();
+  // ID de l'application Discord (public, pas un secret). Valeur de secours si le réglage est vide :
+  // le bouton « Connexion » ne disparaît plus si site-data.js est remplacé par une ancienne copie.
+  const DEFAULT_CLIENT_ID = "1566877067717513336";
+  const clientId = () => (SITE_DATA.settings.discordClientId || DEFAULT_CLIENT_ID).trim();
+  const canLogin = () => /^https?:$/.test(location.protocol);
   // Adresse de retour : la page du site sans le #… (à déclarer telle quelle dans Discord)
-  const redirectUri = () => location.origin + location.pathname;
+  // (« …/index.html » et « …/ » sont ramenés à la même adresse : une seule à déclarer dans Discord)
+  const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, "");
 
   let session = store.get(STORE);
   if (session && session.expires < Date.now()) { store.del(STORE); session = null; }
+  // Seul le jeton est gardé d'une visite à l'autre : le profil et surtout les rôles sont
+  // revérifiés auprès de Discord à chaque chargement de page (un rôle retiré n'est jamais « gardé »).
+  if (session) session.user = null;
 
   // ---------- Retour de Discord : #access_token=…&state=… ----------
   // Lu avant le routeur (script.js) pour que l'adresse ne soit pas prise pour une page.
@@ -49,14 +59,14 @@
           scope: params.get("scope") || "",
           user: null,
         };
-        store.set(STORE, session);
+        store.set(STORE, { ...session, user: null });
       }
     }
     history.replaceState(null, "", location.pathname + location.search + back);
   }
 
   function login() {
-    if (!clientId()) return;
+    if (!clientId() || !canLogin()) return;
     const nonce = crypto.getRandomValues(new Uint32Array(4)).join("-");
     store.set(STATE, { nonce, back: location.hash }, sessionStorage);
     const q = new URLSearchParams({
@@ -78,18 +88,17 @@
     document.dispatchEvent(new CustomEvent("auth:change", { detail: null }));
   }
 
-  // Profil Discord (gardé en mémoire une journée)
+  // Profil Discord et rôles : redemandés à Discord à chaque chargement de page (et au retour sur l'onglet)
   async function loadUser() {
     if (!session) return;
-    if (session.user && Date.now() - session.user.fetched < 864e5) return;
     try {
       const r = await fetch(`${API}/users/@me`, { headers: { Authorization: `Bearer ${session.token}` } });
       if (r.status === 401) return logout();
       if (!r.ok) return;
       const u = await r.json();
       session.user = { id: u.id, username: u.username, name: u.global_name || u.username, avatar: u.avatar, fetched: Date.now(), ...(await loadMembership()) };
-      store.set(STORE, session);
-    } catch { /* hors ligne : on garde l'ancien profil */ }
+      store.set(STORE, { ...session, user: null });   // le profil / les rôles ne sont pas conservés
+    } catch { /* hors ligne : pas de vérification possible, donc pas de droits */ }
   }
 
   // Membre du serveur de la Shock ? Avec le rôle de gérant ?
@@ -100,7 +109,7 @@
       const r = await fetch(`${API}/users/@me/guilds/${guildId()}/member`, { headers: { Authorization: `Bearer ${session.token}` } });
       if (!r.ok) return { inGuild: false, manager: false };   // 404 / 403 : pas sur le serveur
       const m = await r.json();
-      return { inGuild: true, manager: (m.roles || []).includes(roleId()) };
+      return { inGuild: true, manager: (m.roles || []).some((r) => roleIds().includes(r)) };
     } catch {
       return { inGuild: false, manager: false };
     }
@@ -125,13 +134,12 @@
           <img src="${esc(avatarUrl(u))}" alt=""><span>${esc(u.name)}</span></button>
         <div class="auth-menu" hidden>
           <p class="auth-who">${DISCORD_ICON}<span>Connecté en tant que<strong>${esc(u.name)}</strong><small>@${esc(u.username)}</small></span></p>
-          ${u.manager ? `<p class="auth-badge">🛡️ Gérant du site</p>
-          <button type="button" class="auth-action" data-auth="code">🔑 Gérer le code d'accès</button>` : ""}
+          ${u.manager ? `<p class="auth-badge">1010 Fox</p>` : ""}
           <button type="button" class="auth-logout">Se déconnecter</button>
         </div>`;
-    } else if (session) {
+    } else if (session && loading) {
       box.innerHTML = "";   // profil en cours de chargement
-    } else if (clientId()) {
+    } else if (clientId() && canLogin()) {   // pas connecté, ou connexion à refaire (profil introuvable)
       box.innerHTML = `<button type="button" class="auth-login" title="Se connecter avec Discord (facultatif)">${DISCORD_ICON}<span>Connexion</span></button>`;
     } else {
       box.innerHTML = "";   // connexion Discord pas encore configurée
@@ -144,10 +152,6 @@
     const menu = box.querySelector(".auth-menu");
     if (e.target.closest(".auth-login")) return login();
     if (e.target.closest(".auth-logout")) return logout();
-    if (e.target.closest('[data-auth="code"]')) {
-      menu.hidden = true;
-      return window.SHOCK_EDITOR?.manageCode();
-    }
     const toggle = e.target.closest(".auth-user");
     if (toggle && menu) {
       menu.hidden = !menu.hidden;
@@ -159,11 +163,35 @@
   });
 
   window.renderAuth = render;
-  window.SHOCK_AUTH = { login, logout, get user() { return session?.user || null; } };
+  let loading = true;   // profil en cours de chargement
+  window.SHOCK_AUTH = {
+    login, logout,
+    get user() { return session?.user || null; },
+    // Connexion Discord, envoyée au relais de publication (qui vérifie le rôle) ; jamais un jeton GitHub
+    get token() { return session?.token || null; },
+    get pending() { return loading && !!session && !session.user; },
+    get available() { return !!clientId() && canLogin(); },   // bouton « Connexion » utilisable ?
+  };
 
   render();
   loadUser().then(() => {
+    loading = false;
     render();
-    if (session?.user) document.dispatchEvent(new CustomEvent("auth:change", { detail: session.user }));
+    document.dispatchEvent(new CustomEvent("auth:change", { detail: session?.user || null }));
+  });
+
+  // Retour sur l'onglet (au plus une fois par minute) : on revérifie les rôles, au cas où ils auraient changé
+  let lastCheck = Date.now();
+  window.addEventListener("focus", async () => {
+    if (!session || Date.now() - lastCheck < 60000) return;
+    lastCheck = Date.now();
+    const before = session.user ? `${session.user.id}|${session.user.manager}` : "";
+    await loadUser();
+    if (!session) return;
+    const after = session.user ? `${session.user.id}|${session.user.manager}` : "";
+    if (before !== after) {
+      render();
+      document.dispatchEvent(new CustomEvent("auth:change", { detail: session.user || null }));
+    }
   });
 })();

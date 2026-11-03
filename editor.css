@@ -591,3 +591,86 @@ body.editing .blk-button a.btn { cursor: grab; }
   .ed-goto { margin-left: 0; }
   #ed-panel { top: auto; height: 60vh; border-left: none; border-top: 3px solid var(--red); }
 }
+
+/* =========================================================
+   Ajouts locaux : menu « Gestion » du pied de page
+   ========================================================= */
+.manage { position: relative; }
+.manage-menu {
+  position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 30;
+  min-width: 250px; padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--panel-2); border: 1px solid var(--line); border-top: 3px solid var(--red); border-radius: 10px;
+  box-shadow: 0 -12px 30px rgba(0,0,0,.5);
+}
+.manage-menu[hidden] { display: none; }
+.manage-menu button {
+  text-align: left; background: none; border: 0; border-radius: 6px; cursor: pointer;
+  color: var(--white); font: inherit; font-size: 15px; font-weight: 600; padding: 10px 12px;
+}
+.manage-menu button:hover { background: var(--red-dark); }
+.manage-menu button.locked { color: var(--muted); }
+body.editing .manage { display: none; }
+
+/* Page lue en lecture seule dans l'éditeur (mode officier) */
+.ed-readonly {
+  max-width: 1180px; margin: 12px auto 0; padding: 10px 16px; border-left: 4px solid var(--red);
+  background: var(--panel); color: #ff6b70; font-weight: 600;
+}
+
+/* =========================================================
+   Page « Gestion des officiers »
+   ========================================================= */
+.off-page { max-width: none; }
+.off-lead { font-size: 1.05rem; }
+.off-tag {
+  display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 700;
+  background: rgba(215,25,31,.15); border: 1px solid rgba(215,25,31,.5); color: #ff6b70;
+}
+.off-lock { padding: 14px 18px; border-left: 4px solid var(--red); background: var(--panel-2); font-size: 1.05rem; }
+.off-hint { color: var(--muted); font-size: 14px; }
+.off-error { margin: 8px 0; padding: 8px 12px; border-left: 4px solid var(--red); background: rgba(215,25,31,.12); color: #ff8a8e; font-weight: 600; }
+.off-empty { margin: 18px 0; padding: 18px; text-align: center; color: var(--muted); border: 1px dashed var(--line); }
+
+.off-btn {
+  padding: 9px 18px; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; border-radius: 6px;
+  color: var(--white); background: var(--panel-2); border: 1px solid var(--line);
+}
+.off-btn:hover { border-color: var(--red); }
+.off-primary { background: var(--red); border-color: var(--red); color: #fff; }
+.off-primary:hover { background: var(--red-dark); border-color: var(--red-dark); }
+.off-btn.pending { box-shadow: 0 0 0 3px rgba(215,25,31,.45); }
+
+.off-add { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 18px 0 6px; }
+.off-add label { flex: 1 1 220px; display: block; font-weight: 600; font-size: 14px; }
+.off-add input, .off-name {
+  width: 100%; padding: 8px 10px; font: inherit; color: var(--white);
+  background: var(--black); border: 1px solid var(--line); border-radius: 6px;
+}
+.off-add input { margin-top: 4px; }
+.off-add input:focus, .off-name:focus { outline: none; border-color: var(--red); }
+
+.off-bar { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 16px 0; }
+.off-status { color: var(--muted); font-size: 14px; }
+
+.off-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.off-table { border-collapse: separate; border-spacing: 0; min-width: 100%; font-size: 14px; }
+.off-table th, .off-table td {
+  padding: 6px 8px; text-align: center; background: var(--panel);
+  border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.off-table tbody tr:hover th, .off-table tbody tr:hover td { background: var(--panel-2); }
+.off-table input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--red); cursor: pointer; }
+.off-user { position: sticky; left: 0; z-index: 1; min-width: 250px; max-width: 250px; text-align: left !important; }
+.off-user small { display: block; color: var(--muted); font-weight: 400; margin: 2px 0 6px; }
+.off-corner { z-index: 3; background: var(--panel-2) !important; vertical-align: bottom; }
+.off-top { background: var(--panel-2) !important; color: var(--white); font-family: "Orbitron", sans-serif; font-size: 13px; letter-spacing: .04em; }
+.off-grp { background: var(--panel-2) !important; color: #ff6b70; font-weight: 700; border-top: 1px solid var(--line); }
+.off-page-th { background: var(--panel-2) !important; padding: 8px 2px !important; min-width: 36px; vertical-align: bottom; }
+.off-vert { display: inline-block; writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; font-weight: 600; max-height: 190px; overflow: hidden; text-overflow: ellipsis; }
+.off-row-actions { display: flex; gap: 6px; margin-top: 6px; }
+.off-row-actions button {
+  padding: 3px 10px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; border-radius: 5px;
+  color: var(--white); background: var(--panel-2); border: 1px solid var(--line);
+}
+.off-row-actions button:hover { border-color: var(--red); }
+.off-row-actions .off-del { margin-left: auto; }

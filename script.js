@@ -130,11 +130,16 @@ function route(keepScroll) {
   const id = decodeURIComponent(location.hash.slice(1)) || "accueil";
   // Ancre interne de l'accueil : on laisse le navigateur défiler
   if (id === "bienvenue" && $("#bienvenue")) return;
-  const page = PAGES[id] || PAGES.accueil || Object.values(PAGES)[0];
+  // Pages spéciales (hors menu), déclarées par d'autres scripts : ex. « Gestion des officiers »
+  const special = window.SPECIAL_PAGES?.[id];
+  const page = special
+    ? { id, title: special.title, icon: special.icon, trail: [], special: true }
+    : PAGES[id] || PAGES.accueil || Object.values(PAGES)[0];
   currentPage = page;
-  $("#app").innerHTML = page.id === "accueil" ? renderHome() : renderPage(page);
-  enhance($("#app"));
-  document.title = page.id === "accueil" ? `Shock Trooper | ${SITE_DATA.settings.siteName}` : `${page.title} | Shock Trooper`;
+  $("#app").innerHTML = special ? special.render(page) : page.id === "accueil" ? renderHome() : renderPage(page);
+  if (!special) enhance($("#app"));
+  document.title = special ? `${page.title} | Shock Trooper`
+    : page.id === "accueil" ? `Shock Trooper | ${SITE_DATA.settings.siteName}` : `${page.title} | Shock Trooper`;
   if (keepScroll !== true) window.scrollTo(0, 0);
   markActive();
   document.dispatchEvent(new CustomEvent("page:rendered", { detail: page }));

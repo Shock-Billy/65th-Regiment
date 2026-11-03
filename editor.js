@@ -1,29 +1,23 @@
 // =========================================================
 // Éditeur du site, façon Google Sites.
-// - Accès : bouton « Modifier le site » en bas de page + code.
+// - Accès : menu « Gestion » en bas de page, réservé par Discord : CMDM 1010 Fox (rôle) ou
+//   officier désigné dans « Gestion des officiers ». Aucun code d'accès.
 // - Les pages sont faites de rangées (.blk-row) contenant des blocs (.blk) :
 //   zone de texte, image, intégration, bouton, carrousel… Chaque bloc se
 //   sélectionne d'un clic, se glisse par sa bordure (ou ⠿), se redimensionne
 //   par la poignée entre deux colonnes et se supprime avec la corbeille.
-// - « Publier » enregistre site-data.js, content.js et les nouvelles images
-//   dans le dépôt GitHub du site (GitHub Pages se met à jour tout seul).
-// - Le jeton GitHub est stocké chiffré avec le code dans editor-config.js :
-//   sans le code, il est illisible. Ce fichier contient aussi l'empreinte
-//   du code (codeHash), que les gérants Discord peuvent changer.
+// - « Publier » envoie site-data.js, content.js et les nouvelles images au relais de
+//   publication (worker/publish-worker.js). Le relais vérifie le rôle Discord puis écrit sur
+//   GitHub avec le jeton du CMDM 1010 Fox : ce jeton n'est JAMAIS dans les fichiers du site.
 // =========================================================
 (() => {
-  // Empreinte du code d'origine, utilisée tant que editor-config.js n'a pas de codeHash
-  const DEFAULT_CODE_HASH = "50854eed4fd63e2a3d4eed7656b44da46664bb48a14109c42518cff2c13db63e";
-  const MIN_CODE_LENGTH = 8;
-  const PBKDF2_ITERATIONS = 310000;
   const MAX_COLUMNS = 4;
 
   const ed = {
     active: false,
     dirty: false,
-    code: null,
-    config: null,     // { repo, branch, salt, iv, token } (token chiffré)
-    token: null,      // jeton GitHub déchiffré, en mémoire uniquement
+    scope: null,      // null = tout le site ; sinon liste des pages que l'officier connecté peut modifier
+    orig: null,       // copie de CONTENT à l'ouverture (mode officier)
     uploads: {},      // chemin -> { blobUrl, b64, done }
     savedRange: null,
     activeRt: null,   // zone de texte en cours d'édition
@@ -47,71 +41,29 @@
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "page";
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  async function sha256(str) {
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
-    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  // ---------- Relais de publication ----------
+  // Le navigateur ne connaît aucun jeton : il envoie sa connexion Discord au relais, qui
+  // vérifie le rôle (Fox / officier) puis publie sur GitHub avec le jeton du Fox.
+  const relayUrl = () => String(SITE_DATA.settings.publishUrl || "").trim().replace(/\/+$/, "");
+  async function relay(path, body) {
+    const base = relayUrl();
+    if (!base) throw new Error("le relais de publication n'est pas configuré (Réglages → Publication, voir LISEZMOI-PUBLICATION.txt)");
+    const token = window.SHOCK_AUTH?.token;
+    if (!token) throw new Error("connexion Discord requise : reconnecte-toi");
+    let r;
+    try {
+      r = await fetch(base + path, {
+        method: body ? "POST" : "GET",
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch { throw new Error("relais injoignable (vérifie son adresse dans Réglages → Publication)"); }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `erreur ${r.status}`);
+    return data;
   }
-
-  async function deriveKey(code, salt) {
-    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(code), "PBKDF2", false, ["deriveKey"]);
-    return crypto.subtle.deriveKey(
-      { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
-      base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-  }
-  async function encryptToken(token, code) {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const key = await deriveKey(code, salt);
-    const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(token));
-    return { salt: bytesToB64(salt), iv: bytesToB64(iv), token: bytesToB64(new Uint8Array(data)) };
-  }
-  async function decryptToken(cfg, code) {
-    const key = await deriveKey(code, b64ToBytes(cfg.salt));
-    const data = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64ToBytes(cfg.iv) }, key, b64ToBytes(cfg.token));
-    return new TextDecoder().decode(data);
-  }
-
-  function loadScript(src) {
-    return new Promise((resolve) => {
-      const s = document.createElement("script");
-      s.src = src;
-      s.onload = () => resolve(true);
-      s.onerror = () => { s.remove(); resolve(false); };
-      document.head.appendChild(s);
-    });
-  }
-
-  // ---------- GitHub ----------
-  async function gh(path, opts = {}) {
-    const r = await fetch(`https://api.github.com/repos/${ed.config.repo}${path}`, {
-      ...opts,
-      cache: "no-store",
-      headers: {
-        Authorization: `Bearer ${ed.token}`,
-        Accept: "application/vnd.github+json",
-        ...(opts.body ? { "Content-Type": "application/json" } : {}),
-      },
-    });
-    if (!r.ok) {
-      const msg = (await r.json().catch(() => ({}))).message || r.statusText;
-      const err = new Error(`GitHub ${r.status} : ${msg}`);
-      err.status = r.status;
-      throw err;
-    }
-    return r.status === 204 ? null : r.json();
-  }
-  const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
-  async function getFile(path) {
-    try { return await gh(`/contents/${encPath(path)}?ref=${encodeURIComponent(ed.config.branch)}`); }
-    catch (e) { if (e.status === 404) return null; throw e; }
-  }
-  async function putFile(path, b64, message) {
-    const current = await getFile(path);
-    return gh(`/contents/${encPath(path)}`, {
-      method: "PUT",
-      body: JSON.stringify({ message, content: b64, branch: ed.config.branch, ...(current ? { sha: current.sha } : {}) }),
-    });
-  }
+  const publishFiles = (files, message) => relay("/publish", { message, files });
 
   // Recharge la dernière version publiée (au cas où GitHub Pages n'est pas encore à jour)
   async function pullLatest() {
@@ -119,10 +71,13 @@
       Object.keys(target).forEach((k) => delete target[k]);
       Object.assign(target, source);
     };
-    const site = await getFile("site-data.js");
-    if (site?.content) replace(SITE_DATA, new Function(b64ToUtf8(site.content.replace(/\s/g, "")) + "\nreturn SITE_DATA;")());
-    const content = await getFile("content.js");
-    if (content?.content) replace(CONTENT, new Function(b64ToUtf8(content.content.replace(/\s/g, "")) + "\nreturn CONTENT;")());
+    const { files } = await relay("/read?files=site-data.js,content.js");
+    const url = relayUrl();   // l'adresse du relais qui marche est gardée même si la version publiée n'en a pas encore
+    if (files["site-data.js"]) {
+      replace(SITE_DATA, new Function(files["site-data.js"] + "\nreturn SITE_DATA;")());
+      if (!SITE_DATA.settings.publishUrl) SITE_DATA.settings.publishUrl = url;
+    }
+    if (files["content.js"]) replace(CONTENT, new Function(files["content.js"] + "\nreturn CONTENT;")());
     renderAll(true);
   }
 
@@ -191,180 +146,118 @@
     if (s) s.textContent = text;
   }
 
-  // ---------- Accès par code ----------
+  // ---------- Accès : Discord (qui ?) puis code (déverrouille le jeton GitHub) ----------
+  // Un officier (voir officiers.js) ne modifie que les pages qui lui sont attribuées
+  const canEditPage = (id) => !ed.scope || ed.scope.includes(id);
+
+  // Qui peut ouvrir l'éditeur ? { pages: null } = tout le site (CMDM 1010 Fox), { pages: [...] } = officier
+  async function discordGate() {
+    const user = window.SHOCK_USER;
+    const auth = window.SHOCK_AUTH;
+    if (user?.manager) return { pages: null };
+    const pages = window.SHOCK_OFFICERS?.pagesFor(user) || [];
+    if (pages.length) return { pages };
+    if (auth?.pending) { toast("Vérification de ta connexion Discord… réessaie dans un instant."); return null; }
+    if (!user) {
+      const canLogin = !!auth?.available;
+      const r = await modal({
+        title: "🔒 Accès réservé",
+        html: `<p>Seuls le CMDM 1010 Fox et les officiers qu'il a désignés peuvent modifier le site. Connecte-toi avec Discord pour vérifier tes droits.</p>
+          ${canLogin ? "" : `<p class="ed-hint">La connexion Discord n'est pas disponible ici : ouvre le site en ligne (https) ou en local avec un serveur.</p>`}`,
+        ok: canLogin ? "Se connecter avec Discord" : "",
+        cancel: canLogin ? "Annuler" : "Fermer",
+      });
+      if (r) auth.login();
+      return null;
+    }
+    await modal({
+      title: "⛔ Accès refusé",
+      html: `<p>Tu es connecté en tant que <strong>${esc(user.name)}</strong>, mais tu n'as pas la permission de modifier le site. Demande au CMDM 1010 Fox de t'ajouter à la liste des officiers.</p>`,
+      ok: "",
+      cancel: "Fermer",
+    });
+    return null;
+  }
+
   async function openEditor() {
     if (ed.active) return;
-    if (!window.crypto?.subtle) {
-      await modal({ title: "Éditeur indisponible", html: "<p>L'éditeur fonctionne uniquement sur le site en ligne (adresse en https) ou en local via un serveur, pas en ouvrant le fichier directement.</p>", ok: "OK", cancel: "" });
-      return;
-    }
-    // La configuration publiée contient l'empreinte du code actuel
-    if (!window.EDITOR_CONFIG) await loadScript(`editor-config.js?v=${Date.now()}`);
-    let error = "";
-    for (;;) {
-      const r = await modal({
-        title: "🔒 Accès à l'éditeur",
-        html: `<p>Entre le code pour modifier le site.</p>
-          <input type="password" name="code" placeholder="Code" required>
-          ${error ? `<p class="ed-error">${error}</p>` : ""}`,
-        ok: "Entrer",
-      });
-      if (!r) return;
-      if (await sha256(r.code) === codeHash()) { ed.code = r.code; break; }
-      error = "Code incorrect.";
-    }
-
-    if (window.EDITOR_CONFIG) {
-      ed.config = window.EDITOR_CONFIG;
-      try {
-        ed.token = await decryptToken(ed.config, ed.code);
-      } catch {
-        toast("Impossible de déchiffrer la configuration GitHub. Refais la configuration.", true);
-        ed.config = null;
-      }
-    }
-    if (ed.token) {
+    const gate = await discordGate();
+    if (!gate) return;
+    // Dernière version publiée (si le relais est configuré)
+    if (relayUrl()) {
       try { await pullLatest(); }
       catch (e) { toast(`Dernière version non récupérée (${e.message}). Tu modifies la version affichée.`, true); }
     }
+    ed.scope = gate.pages;
+    startEditing();
+  }
+
+  function startEditing() {
+    // On revient sur une vraie page si on est sur « Gestion des officiers » ou sur une page non autorisée
+    const cur = currentPage;
+    if (cur?.special || !canEditPage(cur?.id)) location.hash = "#" + (ed.scope ? ed.scope[0] : "accueil");
+    ed.orig = ed.scope ? { ...CONTENT } : null;
     enterEditMode();
-    if (!ed.token) await setupGitHub(true);
+    if (ed.scope) toast(`Mode officier : tu peux modifier ${ed.scope.length} page${ed.scope.length > 1 ? "s" : ""}.`);
   }
 
-  // ---------- Configuration GitHub (une seule fois) ----------
-  function guessRepo() {
-    const m = location.hostname.match(/^([\w-]+)\.github\.io$/);
-    if (!m) return "";
-    const repo = location.pathname.split("/").filter(Boolean)[0];
-    return repo ? `${m[1]}/${repo}` : `${m[1]}/${m[1]}.github.io`;
-  }
-
-  async function setupGitHub(first) {
+  // ---------- Jeton GitHub : seul le CMDM 1010 Fox peut le changer ----------
+  // Il est envoyé au relais (qui le garde côté serveur), jamais écrit dans les fichiers du site.
+  async function tokenModal() {
+    if (!window.SHOCK_USER?.manager) return toast("Réservé au CMDM 1010 Fox.", true);
+    let status = null;
+    try { status = await relay("/status"); } catch (e) { toast(`❌ ${e.message}`, true); return; }
+    if (status.role !== "fox") return toast("Le relais ne te reconnaît pas comme CMDM 1010 Fox (vérifie FOX_ROLE_IDS dans Cloudflare).", true);
+    if (!status.kv) {
+      await modal({
+        title: "🔑 Jeton GitHub",
+        html: `<p>Le jeton GitHub est gardé par le relais${status.configured ? ` (dépôt <strong>${esc(status.repo)}</strong>, branche ${esc(status.branch)})` : ""}. Pour le changer : Cloudflare → ton worker → Settings → Variables and Secrets → <strong>GITHUB_TOKEN</strong>.</p>
+          <p class="ed-hint">Pour pouvoir le changer depuis cette fenêtre, lie un espace KV nommé <strong>SETTINGS</strong> au worker (voir LISEZMOI-PUBLICATION.txt).</p>`,
+        ok: "OK", cancel: "",
+      });
+      return;
+    }
     let error = "";
-    let values = { repo: ed.config?.repo || guessRepo(), branch: ed.config?.branch || "main", token: "" };
     for (;;) {
       const r = await modal({
-        title: "⚙️ Relier l'éditeur à GitHub",
+        title: "🔑 Jeton GitHub (CMDM 1010 Fox)",
         wide: true,
-        html: `<p>Pour publier les modifications, l'éditeur a besoin d'un accès au dépôt GitHub du site. Cette étape se fait <strong>une seule fois</strong>.</p>
+        html: `<p>Le jeton reste dans le relais de publication : personne d'autre, pas même les officiers, ne peut le lire. Les officiers publient grâce à lui, mais seulement sur leurs pages.</p>
           <ol class="ed-steps">
             <li>Sur GitHub : photo de profil → <em>Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token</em>.</li>
-            <li>Dans <em>Repository access</em>, choisis <strong>Only select repositories</strong> et sélectionne le dépôt du site.</li>
-            <li>Dans <em>Permissions</em>, ajoute <strong>Contents : Read and write</strong>.</li>
-            <li>Génère le jeton, puis colle-le ci-dessous.</li>
+            <li><em>Repository access</em> : <strong>Only select repositories</strong> → le dépôt du site.</li>
+            <li><em>Permissions</em> : <strong>Contents : Read and write</strong>.</li>
           </ol>
-          <label>Dépôt (pseudo/nom-du-depot)<input name="repo" required placeholder="pseudo/site-shock" value="${esc(values.repo)}"></label>
-          <label>Branche<input name="branch" required value="${esc(values.branch)}"></label>
-          <label>Jeton GitHub<input name="token" type="password" required placeholder="github_pat_…"></label>
-          <p class="ed-hint">Le jeton est chiffré avec le code de l'éditeur avant d'être enregistré dans le dépôt (fichier editor-config.js).</p>
+          <label>Dépôt (pseudo/nom-du-depot)<input name="repo" required placeholder="shock-kalouche/site-shock" value="${esc(status.repo || "")}"></label>
+          <label>Branche<input name="branch" required value="${esc(status.branch || "main")}"></label>
+          <label>Jeton GitHub<input name="token" type="password" required placeholder="github_pat_…" autocomplete="off"></label>
           ${error ? `<p class="ed-error">${error}</p>` : ""}`,
-        ok: "Enregistrer",
-        cancel: first ? "Plus tard" : "Annuler",
-      });
-      if (!r) {
-        if (first) setStatus("Non relié à GitHub : publication impossible");
-        return false;
-      }
-      values = r;
-      const repo = r.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/\/$/, "");
-      try {
-        ed.config = { repo, branch: r.branch.trim() };
-        ed.token = r.token.trim();
-        const info = await gh("");
-        if (!info.permissions?.push) throw new Error("ce jeton n'a pas le droit d'écrire dans ce dépôt (Contents : Read and write).");
-        await saveConfig(repo, ed.config.branch, ed.code, "Configuration de l'éditeur");
-        setStatus("Relié à GitHub");
-        toast("✅ Éditeur relié à GitHub.");
-        return true;
-      } catch (e) {
-        ed.token = null;
-        error = `Échec : ${esc(e.message)}`;
-      }
-    }
-  }
-
-  // Code actuel : celui de la configuration publiée, sinon le code d'origine
-  const codeHash = () => window.EDITOR_CONFIG?.codeHash || DEFAULT_CODE_HASH;
-
-  // Chiffre le jeton (ed.token) avec le code et publie editor-config.js
-  async function saveConfig(repo, branch, code, message) {
-    const enc = await encryptToken(ed.token, code);
-    ed.config = { repo, branch, ...enc, codeHash: await sha256(code) };
-    const file = "// Configuration de l'éditeur (jeton GitHub chiffré avec le code, empreinte du code). Ne pas modifier à la main.\n"
-      + "window.EDITOR_CONFIG = " + JSON.stringify(ed.config, null, 2) + ";\n";
-    await putFile("editor-config.js", utf8ToB64(file), message);
-    window.EDITOR_CONFIG = ed.config;
-  }
-
-  // ---------- Gestion du code d'accès (gérants connectés avec Discord) ----------
-  async function manageCode() {
-    if (!window.SHOCK_USER?.manager) return;
-    if (!window.crypto?.subtle) return toast("Indisponible ici : ouvre le site en ligne (https).", true);
-    if (!window.EDITOR_CONFIG) await loadScript(`editor-config.js?v=${Date.now()}`);
-    const cfg = window.EDITOR_CONFIG;
-    const newCodeFields = `<label>Nouveau code<input type="password" name="code1" required minlength="${MIN_CODE_LENGTH}" autocomplete="new-password"></label>
-      <label>Confirmer le nouveau code<input type="password" name="code2" required minlength="${MIN_CODE_LENGTH}" autocomplete="new-password"></label>
-      <p class="ed-hint">Au moins ${MIN_CODE_LENGTH} caractères. Mélange lettres, chiffres et symboles : le code protège l'accès en écriture au site.</p>`;
-    let mode = cfg?.token ? "change" : "reset";
-    let error = "";
-    for (;;) {
-      const r = await modal({
-        title: "🔑 Code d'accès au menu de modification",
-        wide: true,
-        html: mode === "change"
-          ? `<p>Change le code demandé par le bouton « ✏️ Modifier le site ». Les autres personnes devront utiliser le nouveau code.</p>
-            <label>Code actuel<input type="password" name="current" required autocomplete="current-password"></label>
-            ${newCodeFields}
-            ${error ? `<p class="ed-error">${error}</p>` : ""}`
-          : `<p>${cfg?.token ? "Code actuel oublié ? " : ""}Le code protège le jeton GitHub qui permet de publier. Sans l'ancien code, ce jeton ne peut pas être récupéré : il faut en coller un nouveau (Contents : Read and write sur le dépôt du site).</p>
-            <label>Dépôt (pseudo/nom-du-depot)<input name="repo" required value="${esc(cfg?.repo || guessRepo())}"></label>
-            <label>Branche<input name="branch" required value="${esc(cfg?.branch || "main")}"></label>
-            <label>Jeton GitHub<input name="token" type="password" required placeholder="github_pat_…"></label>
-            ${newCodeFields}
-            ${error ? `<p class="ed-error">${error}</p>` : ""}`,
-        ok: "Enregistrer le nouveau code",
-        extra: mode === "change"
-          ? `<button type="button" class="ed-btn" data-v="forgot">Code actuel oublié ?</button>`
-          : (cfg?.token ? `<button type="button" class="ed-btn" data-v="back">← Je connais le code actuel</button>` : ""),
+        ok: "Enregistrer le jeton",
       });
       if (!r) return;
-      if (r._action === "forgot") { mode = "reset"; error = ""; continue; }
-      if (r._action === "back") { mode = "change"; error = ""; continue; }
-      if (r.code1.length < MIN_CODE_LENGTH) { error = `Le nouveau code doit faire au moins ${MIN_CODE_LENGTH} caractères.`; continue; }
-      if (r.code1 !== r.code2) { error = "Les deux nouveaux codes ne sont pas identiques."; continue; }
-
-      const prev = { config: ed.config, token: ed.token };
+      const repo = r.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/\/$/, "");
       try {
-        if (mode === "change") {
-          if (await sha256(r.current) !== codeHash()) { error = "Code actuel incorrect."; continue; }
-          ed.config = cfg;
-          ed.token = await decryptToken(cfg, r.current);
-          await saveConfig(cfg.repo, cfg.branch, r.code1, "Changement du code de l'éditeur");
-        } else {
-          const repo = r.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/\/$/, "");
-          ed.config = { repo, branch: r.branch.trim() };
-          ed.token = r.token.trim();
-          const info = await gh("");
-          if (!info.permissions?.push) throw new Error("ce jeton n'a pas le droit d'écrire dans ce dépôt (Contents : Read and write).");
-          await saveConfig(repo, ed.config.branch, r.code1, "Nouveau code de l'éditeur");
-        }
-        // Éditeur ouvert : il continue avec le nouveau code ; sinon on ne garde pas le jeton en mémoire
-        if (ed.active) ed.code = r.code1;
-        else { ed.token = null; ed.config = null; }
-        await modal({
-          title: "✅ Code changé",
-          html: "<p>Le nouveau code est enregistré. Sur le site en ligne, il remplace l'ancien d'ici une à deux minutes (le temps que GitHub Pages se mette à jour).</p>",
-          ok: "OK", cancel: "",
-        });
+        await relay("/token", { repo, branch: r.branch.trim(), token: r.token.trim() });
+        toast("✅ Jeton GitHub enregistré dans le relais.");
         return;
-      } catch (e) {
-        ed.config = prev.config;
-        ed.token = prev.token;
-        error = `Échec : ${esc(e.message)}`;
-      }
+      } catch (e) { error = `Échec : ${esc(e.message)}`; }
     }
   }
-  window.SHOCK_EDITOR = { manageCode };
+
+  // Publie seulement site-data.js (utilisé par la page « Gestion des officiers », réservée au CMDM 1010 Fox)
+  async function saveSiteData(okMsg = "✅ Publié ! Le site en ligne sera à jour d'ici 1 à 2 minutes.") {
+    if (!window.SHOCK_USER?.manager) { toast("Réservé au CMDM 1010 Fox.", true); return false; }
+    try {
+      await publishFiles([{ path: "site-data.js", text: serializeSiteData() }], "Mise à jour des réglages et des officiers");
+      toast(okMsg);
+      return true;
+    } catch (e) {
+      toast(`❌ Publication impossible : ${e.message}`, true);
+      return false;
+    }
+  }
+  // saveSiteData / modal / toast / isActive : utilisés par officiers.js
+  window.SHOCK_EDITOR = { saveSiteData, modal, toast, isActive: () => ed.active };
 
   // =========================================================
   // Modèle de blocs
@@ -641,6 +534,11 @@
     sizeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyCustomSize(); } });
     sizeInput.addEventListener("change", applyCustomSize);
     bar.querySelector("#ed-goto").addEventListener("change", (e) => { location.hash = e.target.value; });
+    if (ed.scope) {
+      // Mode officier : pas de gestion des pages ni des réglages du site
+      bar.querySelectorAll('[data-act="pages"], [data-act="settings"]').forEach((b) => b.remove());
+      bar.querySelector(".ed-left strong").textContent = "✏️ Édition (officier)";
+    }
 
     blockTools = document.createElement("div");
     blockTools.id = "ed-blk-tools";
@@ -685,7 +583,7 @@
     fileInput.addEventListener("change", onImagesChosen);
     document.body.appendChild(fileInput);
 
-    setStatus(ed.token ? "Relié à GitHub" : "");
+    setStatus(relayUrl() ? "" : "Publication non configurée");
     if (innerWidth >= 1100) togglePanel("insert");
     applyEditable();
   }
@@ -704,6 +602,7 @@
       if (!(await publish())) return;
     }
     ed.active = false;
+    ed.scope = null; ed.orig = null;
     document.body.classList.remove("editing", "ed-panel-open");
     resizeObs.disconnect();
     [bar, blockTools, fileInput, colorPop, linkTip, dropLine, imgFrame, blkFrame, sideMenu].forEach((el) => el?.remove());
@@ -740,8 +639,11 @@
   function fillGoto() {
     const sel = document.getElementById("ed-goto");
     if (!sel) return;
-    sel.innerHTML = Object.values(PAGES).map((p) =>
-      `<option value="${p.id}"${p.id === currentPage?.id ? " selected" : ""}>${"  ".repeat(p.trail.length)}${p.icon} ${esc(p.title)}</option>`).join("");
+    const pages = Object.values(PAGES).filter((p) => canEditPage(p.id));
+    const locked = currentPage && !canEditPage(currentPage.id)
+      ? `<option value="${currentPage.id}" selected>🔒 ${esc(currentPage.title)} (lecture seule)</option>` : "";
+    sel.innerHTML = locked + pages.map((p) =>
+      `<option value="${p.id}"${p.id === currentPage?.id ? " selected" : ""}>${(ed.scope ? "" : "\u00a0\u00a0".repeat(p.trail.length))}${p.icon} ${esc(p.title)}</option>`).join("");
   }
 
   // ---------- Texte : sélection, polices, tailles, couleurs ----------
@@ -921,6 +823,7 @@
   function applyEditable() {
     if (!ed.active) return;
     const page = currentPage;
+    if (page.special) return;   // « Gestion des officiers » n'est pas modifiable
     selectBlock(null);
     hideLinkTip();
     renderPanel();
@@ -928,7 +831,16 @@
     hist.undo = []; hist.redo = [];
     ed.activeRt = null; ed.savedRange = null; ed.container = null;
 
-    if (page.id === "accueil") {
+    // Page non attribuée à cet officier : on l'affiche en lecture seule
+    if (!canEditPage(page.id)) {
+      document.getElementById("app").insertAdjacentHTML("afterbegin",
+        `<p class="ed-readonly">🔒 Lecture seule : le CMDM ne t'a pas donné le droit de modifier cette page.</p>`);
+      return;
+    }
+
+    if (ed.scope) {
+      // Officier : seul le contenu de la page se modifie (pas le titre, l'icône ni les textes de l'accueil)
+    } else if (page.id === "accueil") {
       const htmlFields = ["title", "welcome"];
       document.querySelectorAll("[data-field]").forEach((el) => {
         el.contentEditable = "true";
@@ -1147,7 +1059,7 @@
   // Enregistre la page affichée dans CONTENT
   function sync() {
     const body = bodyEl();
-    if (!ed.active || !body || !currentPage) return;
+    if (!ed.active || !body || !currentPage || currentPage.special || !canEditPage(currentPage.id)) return;
     if (body.querySelector("[data-toc]")) enhance(body.parentElement);
     const html = serializeBody(body);
     if (html === ed.lastSnap) return;
@@ -2158,6 +2070,7 @@
   function insertRows(html) {
     const body = bodyEl();
     if (!body) return;
+    if (!canEditPage(currentPage?.id)) return toast("Cette page est en lecture seule.", true);
     // Ajout demandé avec un bouton ＋ : à gauche ou à droite du bloc
     if (ed.side?.blk?.isConnected) {
       const { blk, side } = ed.side;
@@ -2214,6 +2127,7 @@
   }
 
   async function insertItem(kind) {
+    if (!canEditPage(currentPage?.id)) return toast("Cette page est en lecture seule.", true);
     switch (kind) {
       case "zone": return addZone();
       case "zone-free": {
@@ -3082,6 +2996,7 @@
 
   function renderPanel() {
     if (!panelMode) return;
+    if (ed.scope) panelMode = "insert";   // officier : seulement « Insérer »
     let panel = document.getElementById("ed-panel");
     if (!panel) {
       panel = document.createElement("aside");
@@ -3092,7 +3007,7 @@
       panel.addEventListener("change", onPanelChange);
     }
     document.body.classList.add("ed-panel-open");
-    const tabs = `<div class="ed-tabs">${[["insert", "Insérer"], ["pages", "Pages"], ["settings", "Réglages"]].map(([k, l]) =>
+    const tabs = `<div class="ed-tabs">${[["insert", "Insérer"], ["pages", "Pages"], ["settings", "Réglages"]].filter(([k]) => !ed.scope || k === "insert").map(([k, l]) =>
       `<button data-tab="${k}"${panelMode === k ? ' class="active"' : ""}>${l}</button>`).join("")}</div>`;
     const content = { insert: insertPanelHtml, pages: pagesPanelHtml, settings: settingsPanelHtml }[panelMode]();
     panel.innerHTML = `<div class="ed-panel-head">${tabs}<button class="ed-close" data-close title="Fermer">✕</button></div>${content}`;
@@ -3182,10 +3097,10 @@
       <h4>Connexion Discord</h4>
       <p class="ed-hint">Facultative pour les visiteurs. Colle ici l'« Application ID » de ton application Discord (Developer Portal → OAuth2). Laisse vide pour masquer le bouton « Connexion ».</p>
       <label>ID de l'application Discord<input data-setting="discordClientId" inputmode="numeric" placeholder="ex. 123456789012345678" value="${esc(s.discordClientId || "")}"></label>
-      <p class="ed-hint">Adresse de redirection à déclarer dans Discord : <strong>${esc(location.origin + location.pathname)}</strong></p>
-      <p class="ed-hint">Les membres de ce serveur Discord qui ont ce rôle peuvent changer le code d'accès au menu de modification (menu de leur profil, en haut à droite).</p>
+      <p class="ed-hint">Adresses de redirection à déclarer dans Discord (OAuth2 → Redirects) : <strong>https://shock-kalouche.github.io/site-shock/</strong> (site en ligne) et <strong>http://localhost:8080/</strong> (en local). Adresse de cette page : <strong>${esc(location.origin + location.pathname.replace(/index\.html$/, ""))}</strong></p>
+      <p class="ed-hint">Les membres de ce serveur Discord qui ont ce rôle sont le CMDM 1010 Fox : étiquette rouge dans le menu de leur profil, accès complet à l'éditeur, à « Gestion des officiers » et au changement du code d'accès. Les autres officiers se désignent dans « Gestion → Gestion des officiers ».</p>
       <label>ID du serveur Discord<input data-setting="discordGuildId" inputmode="numeric" value="${esc(s.discordGuildId || "")}"></label>
-      <label>ID du rôle de gérant<input data-setting="discordRoleId" inputmode="numeric" value="${esc(s.discordRoleId || "")}"></label>
+      <label>ID du ou des rôles « CMDM 1010 Fox » (séparés par une virgule)<input data-setting="discordRoleId" placeholder="ex. 1313599623004160082" value="${esc(s.discordRoleId || "")}"></label>
       <h4>Accueil : boutons</h4>
       <p class="ed-hint">Le titre et les textes de l'accueil se modifient directement sur la page d'accueil, et tu peux ajouter des blocs en bas de l'accueil.</p>
       ${buttons}
@@ -3193,9 +3108,10 @@
       <h4>Accueil : accès rapide</h4>
       ${featured}
       <button class="ed-btn" data-add-row="featured">➕ Ajouter un raccourci</button>
-      <h4>GitHub</h4>
-      <p class="ed-hint">${ed.config?.repo ? `Relié au dépôt <strong>${esc(ed.config.repo)}</strong> (branche ${esc(ed.config.branch)}).` : "Pas encore relié."}</p>
-      <button class="ed-btn" data-github>🔑 ${ed.config?.repo ? "Changer le dépôt ou le jeton" : "Relier à GitHub"}</button>`;
+      <h4>Publication</h4>
+      <p class="ed-hint">Adresse du relais de publication (Cloudflare Worker, voir LISEZMOI-PUBLICATION.txt). Il publie sur GitHub à la place des gérants et officiers, après avoir vérifié leur rôle Discord : aucun jeton dans les fichiers du site.</p>
+      <label>Adresse du relais<input data-setting="publishUrl" placeholder="https://shock-publish.ton-compte.workers.dev" value="${esc(s.publishUrl || "")}"></label>
+      <button class="ed-btn" data-github>🔑 Jeton GitHub (Fox)</button>`;
   }
 
   function onPanelClick(e) {
@@ -3211,7 +3127,7 @@
     if (add) return add.dataset.add === "page" ? addPage() : addGroup();
     const tb = t.closest("[data-tree]");
     if (tb) return treeAction(parsePath(tb.closest(".ed-node").dataset.path), tb.dataset.tree);
-    if (t.closest("[data-github]")) return setupGitHub(false).then(renderPanel);
+    if (t.closest("[data-github]")) return tokenModal();
 
     const addRow = t.closest("[data-add-row]");
     if (addRow) {
@@ -3263,22 +3179,28 @@
   async function publish() {
     if (publishing) return false;
     sync();
-    if (!ed.token && !(await setupGitHub(false))) return false;
+    if (!relayUrl()) { toast("Publication impossible : le relais n'est pas configuré (voir LISEZMOI-PUBLICATION.txt).", true); return false; }
     if (!ed.dirty) { toast("Aucune modification à publier."); return true; }
     publishing = true;
     const btn = document.querySelector('#ed-bar [data-act="publish"]');
     btn.disabled = true;
     setStatus("Publication en cours…");
     try {
-      const all = JSON.stringify(CONTENT);
-      for (const [path, up] of Object.entries(ed.uploads)) {
-        if (up.done || !all.includes(path)) continue;
-        await putFile(path, up.b64, `Ajout de l'image ${path.split("/").pop()}`);
-        up.done = true;
+      if (ed.scope && ed.orig) {
+        // Officier : seules les pages attribuées peuvent changer, tout le reste reste comme à l'ouverture
+        for (const k of Object.keys(CONTENT)) if (!ed.scope.includes(k) && !(k in ed.orig)) delete CONTENT[k];
+        for (const k of Object.keys(ed.orig)) if (!ed.scope.includes(k)) CONTENT[k] = ed.orig[k];
       }
-      const msg = "Mise à jour du site depuis l'éditeur";
-      await putFile("site-data.js", utf8ToB64(serializeSiteData()), msg);
-      await putFile("content.js", utf8ToB64(serializeContent()), msg);
+      const all = JSON.stringify(CONTENT);
+      const images = Object.entries(ed.uploads).filter(([path, up]) => !up.done && all.includes(path));
+      // Un officier n'envoie que content.js (et ses images) : jamais le menu, les réglages ni la liste des officiers
+      const files = [
+        ...images.map(([path, up]) => ({ path, b64: up.b64 })),
+        ...(ed.scope ? [] : [{ path: "site-data.js", text: serializeSiteData() }]),
+        { path: "content.js", text: serializeContent() },
+      ];
+      await publishFiles(files, "Mise à jour du site depuis l'éditeur");
+      images.forEach(([, up]) => { up.done = true; });
       ed.dirty = false;
       btn.classList.remove("pending");
       setStatus("Publié");

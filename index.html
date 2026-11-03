@@ -54,12 +54,19 @@
       <img src="logo.png" alt="">
       <p id="footer-text"></p>
       <p class="credit" id="footer-credit"></p>
-      <button class="edit-link" id="edit-open" type="button">✏️ Modifier le site</button>
+      <!-- Menu « Gestion » : géré par officiers.js (menu) et editor.js (modification du site) -->
+      <div class="manage" id="manage">
+        <button class="edit-link" id="manage-toggle" type="button" aria-haspopup="true" aria-expanded="false">⚙️ Gestion ▾</button>
+        <div class="manage-menu" id="manage-menu" hidden>
+          <button type="button" id="edit-open">✏️ Modifier le site</button>
+          <button type="button" id="officers-open">👥 Gestion des officiers</button>
+        </div>
+      </div>
     </div>
   </footer>
 
   <script>
-    ["site-data.js", "content.js", "auth.js", "script.js", "editor.js"].forEach(function (f) {
+    ["site-data.js", "content.js", "auth.js", "officiers.js", "script.js", "editor.js"].forEach(function (f) {
       document.write('<script src="' + f + '?v=' + v + '"><\/script>');
     });
   </script>
