@@ -6,7 +6,7 @@ const SITE_DATA = {
     "sidebarTitle": "Shock Trooper",
     "footerText": "Site de la <strong>Shock Trooper</strong> — Garde de Coruscant",
     "credit": "",
-    "discordClientId": "1566877067717513336",
+    "discordClientId": "1569858655849811978",
     "discordGuildId": "733070665569140769",
     "discordRoleId": "1313599623004160082",
     "publishUrl": "https://shock-publish.dam152001.workers.dev/"
