@@ -9,7 +9,7 @@ const SITE_DATA = {
     "discordClientId": "1566877067717513336",
     "discordGuildId": "733070665569140769",
     "discordRoleId": "1313599623004160082",
-    "publishUrl": ""
+    "publishUrl": "https://shock-publish.dam152001.workers.dev/"
   },
   "home": {
     "kicker": "Garde de Coruscant",
