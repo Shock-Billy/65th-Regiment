@@ -228,7 +228,7 @@
             <li><em>Repository access</em> : <strong>Only select repositories</strong> → le dépôt du site.</li>
             <li><em>Permissions</em> : <strong>Contents : Read and write</strong>.</li>
           </ol>
-          <label>Dépôt (pseudo/nom-du-depot)<input name="repo" required placeholder="shock-kalouche/site-shock" value="${esc(status.repo || "")}"></label>
+          <label>Dépôt (pseudo/nom-du-depot)<input name="repo" required placeholder="Shock-Billy/65th-Regiment" value="${esc(status.repo || "")}"></label>
           <label>Branche<input name="branch" required value="${esc(status.branch || "main")}"></label>
           <label>Jeton GitHub<input name="token" type="password" required placeholder="github_pat_…" autocomplete="off"></label>
           ${error ? `<p class="ed-error">${error}</p>` : ""}`,
@@ -3097,7 +3097,7 @@
       <h4>Connexion Discord</h4>
       <p class="ed-hint">Facultative pour les visiteurs. Colle ici l'« Application ID » de ton application Discord (Developer Portal → OAuth2). Laisse vide pour masquer le bouton « Connexion ».</p>
       <label>ID de l'application Discord<input data-setting="discordClientId" inputmode="numeric" placeholder="ex. 123456789012345678" value="${esc(s.discordClientId || "")}"></label>
-      <p class="ed-hint">Adresses de redirection à déclarer dans Discord (OAuth2 → Redirects) : <strong>https://shock-kalouche.github.io/site-shock/</strong> (site en ligne) et <strong>http://localhost:8080/</strong> (en local). Adresse de cette page : <strong>${esc(location.origin + location.pathname.replace(/index\.html$/, ""))}</strong></p>
+      <p class="ed-hint">Adresse de redirection à déclarer dans Discord (OAuth2 → Redirects), à recopier telle quelle : <strong>${esc(location.origin + location.pathname.replace(/index\.html$/, ""))}</strong></p>
       <p class="ed-hint">Les membres de ce serveur Discord qui ont ce rôle sont le CMDM 1010 Fox : étiquette rouge dans le menu de leur profil, accès complet à l'éditeur, à « Gestion des officiers » et au changement du code d'accès. Les autres officiers se désignent dans « Gestion → Gestion des officiers ».</p>
       <label>ID du serveur Discord<input data-setting="discordGuildId" inputmode="numeric" value="${esc(s.discordGuildId || "")}"></label>
       <label>ID du ou des rôles « CMDM 1010 Fox » (séparés par une virgule)<input data-setting="discordRoleId" placeholder="ex. 1313599623004160082" value="${esc(s.discordRoleId || "")}"></label>
